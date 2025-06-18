@@ -43,6 +43,10 @@ class PatientLabelsSystem:
         self.signal_count = 0
         self.bars_processed = 0
         self.signals_data = []  # Store signals for saving
+        self.strategy_results = None  # Store full strategy results
+        self.event_log = []  # Store events for logging
+        self.session_start_time = datetime.now()
+        self.output_dir = self._create_output_directory()
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file"""
@@ -105,6 +109,39 @@ class PatientLabelsSystem:
             json.dump(default_config, f, indent=2)
         logger.info(f"✅ Created default config: {config_path}")
     
+    def _create_output_directory(self) -> Path:
+        """Create timestamped output directory"""
+        base_dir = Path(self.config['output']['directory'])
+        
+        # Get data source info
+        source_type = self.config['data_source']
+        timestamp = self.session_start_time.strftime('%Y-%m-%d_%H-%M-%S')
+        
+        # Create descriptive directory name
+        if source_type == 'csv':
+            symbol = self.config['csv'].get('symbol', 'UNKNOWN')
+            speed = self.config['csv'].get('speed', 1.0)
+            session_dir = base_dir / f"{source_type}_{symbol}_{speed}x_{timestamp}"
+        else:  # polygon
+            symbols = '_'.join(self.config['polygon'].get('symbols', ['UNKNOWN']))
+            timeframe = self.config['polygon'].get('timeframe', '1min')
+            session_dir = base_dir / f"{source_type}_{symbols}_{timeframe}_{timestamp}"
+        
+        # Create directory
+        session_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"📁 Created session directory: {session_dir}")
+        
+        return session_dir
+    
+    def _log_event(self, event_type: str, data: dict):
+        """Log events for later saving to events.log"""
+        event = {
+            'timestamp': datetime.now().isoformat(),
+            'type': event_type,
+            'data': data
+        }
+        self.event_log.append(event)
+    
     def setup_components(self):
         """Setup all system components"""
         logger.info("🔧 Setting up components...")
@@ -141,6 +178,15 @@ class PatientLabelsSystem:
         """Process incoming data bar"""
         self.bars_processed += 1
         
+        # Log new bar event
+        self._log_event("NEW_BAR", {
+            'bar_count': self.bars_processed,
+            'datetime': bar.get('datetime', ''),
+            'symbol': bar.get('symbol', ''),
+            'close': bar.get('close', 0),
+            'volume': bar.get('volume', 0)
+        })
+        
         # Add to buffer
         self.buffer.append_bar(bar)
         
@@ -152,6 +198,9 @@ class PatientLabelsSystem:
                 # Process with strategy
                 current_df = self.buffer.get_dataframe()
                 result_df = self.strategy.process_data(current_df)
+                
+                # Store full strategy results for saving
+                self.strategy_results = result_df
                 
                 # Check for new signals
                 if len(result_df) > 0:
@@ -172,6 +221,15 @@ class PatientLabelsSystem:
                         }
                         self.signals_data.append(signal_data)
                         
+                        # Log signal event
+                        self._log_event("NEW_SIGNAL", {
+                            'signal_count': self.signal_count,
+                            'type': signal_type,
+                            'entry_price': signal_data['entry_price'],
+                            'stop_loss': signal_data['stop_loss'],
+                            'take_profit': signal_data['take_profit']
+                        })
+                        
                         print(f"\n🚨 [{datetime.now().strftime('%H:%M:%S')}] NEW SIGNAL #{self.signal_count}: {signal_type}")
                         print(f"   💰 Entry: ${latest_bar.get('entry_price', 0):.2f}")
                         print(f"   🛡️  Stop: ${latest_bar.get('stop_loss', 0):.2f}")
@@ -180,6 +238,8 @@ class PatientLabelsSystem:
                 
             except Exception as e:
                 logger.error(f"❌ Strategy error: {e}")
+                # Log error event
+                self._log_event("ERROR", {'error': str(e)})
         
         # Display progress
         current_time = datetime.now().strftime('%H:%M:%S')
@@ -213,16 +273,19 @@ class PatientLabelsSystem:
             
             # Start streaming
             logger.info("🚀 Starting data stream...")
-            streaming_task = asyncio.create_task(
-                self.data_source.start_streaming(self.process_bar)
-            )
+            await self.data_source.start_streaming(self.process_bar)
             
-            # Run for specified duration or until interrupted
+            # Wait for specified duration or until interrupted
             if duration_minutes:
                 await asyncio.sleep(duration_minutes * 60)
                 logger.info(f"⏰ Duration limit reached ({duration_minutes} minutes)")
             else:
-                await streaming_task
+                # Keep running indefinitely until interrupted
+                try:
+                    while self.data_source.is_streaming:
+                        await asyncio.sleep(1)
+                except KeyboardInterrupt:
+                    pass
                 
         except KeyboardInterrupt:
             logger.info("\n⏹️ Stopped by user")
@@ -251,7 +314,7 @@ class PatientLabelsSystem:
         print("="*60 + "\n")
     
     async def _cleanup(self):
-        """Cleanup and save results"""
+        """Cleanup and save results to timestamped directory"""
         if self.data_source:
             try:
                 await self.data_source.stop_streaming()
@@ -260,39 +323,82 @@ class PatientLabelsSystem:
             except Exception as e:
                 logger.warning(f"Warning during cleanup: {e}")
         
-        # Save data if configured
-        if self.config['output']['save_data'] and self.buffer and len(self.buffer.df) > 0:
-            output_dir = Path(self.config['output']['directory'])
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            data_file = output_dir / f"{self.config['data_source']}_data.csv"
-            self.buffer.to_csv(str(data_file))
-            logger.info(f"💾 Data saved to {data_file}")
+        # Use timestamped directory instead of config directory
+        output_dir = self.output_dir
         
-        # Save signals if configured
+        # FILE 1: processed_data.csv (raw buffer data)
+        if self.config['output']['save_data'] and self.buffer and len(self.buffer.df) > 0:
+            data_file = output_dir / "processed_data.csv"
+            self.buffer.to_csv(str(data_file))
+            logger.info(f"💾 Processed data saved to {data_file}")
+        
+        # FILE 2: strategy_results.csv (NEW - full strategy output with indicators)
+        if self.strategy_results is not None and len(self.strategy_results) > 0:
+            results_file = output_dir / "strategy_results.csv"
+            self.strategy_results.to_csv(str(results_file), index=False)
+            logger.info(f"🧠 Strategy results saved to {results_file}")
+        
+        # FILE 3: signals.csv (trading signals only)
         if self.config['output']['save_signals'] and self.signals_data:
-            output_dir = Path(self.config['output']['directory'])
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
             signals_df = pd.DataFrame(self.signals_data)
-            signals_file = output_dir / f"{self.config['data_source']}_signals.csv"
+            signals_file = output_dir / "signals.csv"
             signals_df.to_csv(str(signals_file), index=False)
             logger.info(f"🚨 Signals saved to {signals_file}")
         
+        # FILE 4: events.log (NEW - event log)
+        if self.event_log:
+            events_file = output_dir / "events.log"
+            with open(events_file, 'w') as f:
+                for event in self.event_log:
+                    f.write(f"{event['timestamp']} - {event['type']}: {event['data']}\n")
+            logger.info(f"📝 Events log saved to {events_file}")
+        
+        # FILE 5: session_info.json (BONUS - session metadata)
+        self._save_session_info(output_dir)
+        
         self._display_summary()
     
+    def _save_session_info(self, output_dir: Path):
+        """Save session metadata for easy reference"""
+        import json
+        
+        session_info = {
+            'session_start': self.session_start_time.isoformat(),
+            'session_end': datetime.now().isoformat(),
+            'duration_minutes': (datetime.now() - self.session_start_time).total_seconds() / 60,
+            'data_source': self.config['data_source'],
+            'configuration': self.config,
+            'bars_processed': self.bars_processed,
+            'signals_generated': self.signal_count,
+            'output_directory': str(output_dir)
+        }
+        
+        session_file = output_dir / "session_info.json"
+        with open(session_file, 'w') as f:
+            json.dump(session_info, f, indent=2)
+        logger.info(f"📋 Session info saved to {session_file}")
+    
     def _display_summary(self):
-        """Display session summary"""
+        """Display session summary with timestamped directory info"""
         source_type = self.config['data_source'].upper()
         
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("📊 SESSION SUMMARY")
-        print("="*60)
+        print("="*70)
         print(f"📈 Bars Processed: {self.bars_processed}")
         print(f"🚨 Signals Generated: {self.signal_count}")
         print(f"📊 Data Source: {source_type}")
-        print(f"💾 Output Directory: {self.config['output']['directory']}/")
-        print("="*60)
+        print(f"⏱️  Session Duration: {(datetime.now() - self.session_start_time).total_seconds() / 60:.1f} minutes")
+        print(f"📁 Output Directory: {self.output_dir}/")
+        
+        # Show all 5 files
+        files_saved = []
+        for file_name in ["processed_data.csv", "strategy_results.csv", "signals.csv", "events.log", "session_info.json"]:
+            if (self.output_dir / file_name).exists():
+                files_saved.append(file_name)
+                
+        print(f"📄 Files Saved: {', '.join(files_saved)}")
+        print("="*70)
 
 
 async def main():
