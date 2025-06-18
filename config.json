@@ -1,11 +1,12 @@
 {
   "_comment": "Patient Labels Trading System Configuration",
   "_switch_data_source": "Change 'data_source' to 'csv' or 'polygon'",
-  "data_source": "polygon",
+  "data_source": "csv",
   "csv": {
     "file_path": "data/QQQ_5min_2025-05-01_to_2025-05-01.csv",
     "speed": 10.0,
-    "symbol": "QQQ"
+    "symbol": "QQQ",
+    "timezone": "America/New_York"
   },
   "polygon": {
     "api_key": "R0jSMnnnhxzvbqDFXMbiaJpCyDUwUHod",

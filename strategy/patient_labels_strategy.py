@@ -111,6 +111,7 @@ class PatientLabelsStrategy(BaseStrategy):
     def _is_within_session(self, bar_datetime: pd.Timestamp) -> bool:
         """Check if the current bar is within the configured trading session."""
         if not self.indicator_config.session_start_time or not self.indicator_config.session_end_time:
+            print(f"DEBUG: No session times configured, allowing all bars")
             return True  # If session times are not configured, assume always in session
 
         try:
@@ -140,7 +141,8 @@ class PatientLabelsStrategy(BaseStrategy):
                 current_bar_time = bar_datetime_localized.time()
 
             if session_start <= session_end: # Normal session (e.g., 09:30 to 16:00)
-                return session_start <= current_bar_time <= session_end # End time is now inclusive
+                result = session_start <= current_bar_time < session_end # End time is now exclusive
+                return result
             else: # Overnight session (e.g., 22:00 to 04:00 next day)
                 return current_bar_time >= session_start or current_bar_time <= session_end
         except ValueError:
@@ -226,8 +228,11 @@ class PatientLabelsStrategy(BaseStrategy):
         for i in range(1, len(data)):
             # Check if current bar is within trading session
             current_datetime = pd.to_datetime(data.iloc[i]['datetime'])
-            if not self._is_within_session(current_datetime):
-                continue  # Skip bars outside session window
+            is_in_session = self._is_within_session(current_datetime)
+            
+            # Skip bars outside session window
+            if not is_in_session:
+                continue
             
             # Extract trend information from current bar
             current_bar = patient_labels_result.iloc[i]

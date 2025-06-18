@@ -8,6 +8,7 @@ used throughout the trading system.
 
 import asyncio
 import pandas as pd
+import pytz
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Callable, Optional
 import os
@@ -46,6 +47,7 @@ class CSVDataSource(BaseDataSource):
         self.speed = config.get('speed', 1.0)
         self.delay_ms = config.get('delay_ms', 1000)  # Default 1 second
         self.symbol_override = config.get('symbol')
+        self.timezone = config.get('timezone', 'America/New_York')  # Default to NYSE timezone
         
         # Data storage
         self.csv_data: Optional[pd.DataFrame] = None
@@ -241,7 +243,7 @@ class CSVDataSource(BaseDataSource):
             col_lower = col.lower().strip()
             
             # DateTime column variations
-            if col_lower in ['datetime', 'date', 'time', 'timestamp', 'dt']:
+            if col_lower in ['datetime', 'date', 'time', 'timestamp', 'dt', 'datetime_et']:
                 column_mapping[col] = 'datetime'
             # OHLC columns
             elif col_lower in ['open', 'o']:
@@ -263,8 +265,12 @@ class CSVDataSource(BaseDataSource):
     async def _convert_data_types(self) -> None:
         """Convert data types to appropriate formats."""
         try:
-            # Convert datetime column
-            self.csv_data['datetime'] = pd.to_datetime(self.csv_data['datetime'])
+            # Convert datetime column - strip timezone suffix and treat as ET
+            # Handle formats like "2025-05-01 04:00:00 EDT"
+            datetime_strings = self.csv_data['datetime'].astype(str)
+            # Remove timezone suffix (EDT, EST, etc.)
+            datetime_strings = datetime_strings.str.replace(r'\s+(EDT|EST|ET)$', '', regex=True)
+            self.csv_data['datetime'] = pd.to_datetime(datetime_strings)
             
             # Convert numeric columns
             numeric_cols = ['open', 'high', 'low', 'close', 'volume']
@@ -355,8 +361,10 @@ class CSVDataSource(BaseDataSource):
             # Handle timezone-aware datetime
             dt = row['datetime']
             if dt.tzinfo is None:
-                # Assume UTC if no timezone
-                dt = dt.replace(tzinfo=timezone.utc)
+                # Assume NYSE timezone (ET) if no timezone, not UTC
+                # This is correct for most US stock market data
+                et_tz = pytz.timezone(self.timezone)
+                dt = et_tz.localize(dt)
             
             datetime_iso = dt.isoformat()
             

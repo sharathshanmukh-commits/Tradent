@@ -15,6 +15,7 @@ import argparse
 import logging
 import sys
 import os
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -41,6 +42,7 @@ class PatientLabelsSystem:
         self.strategy = None
         self.signal_count = 0
         self.bars_processed = 0
+        self.signals_data = []  # Store signals for saving
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file"""
@@ -158,6 +160,18 @@ class PatientLabelsSystem:
                         self.signal_count += 1
                         signal_type = "BUY" if latest_bar['signal'] > 0 else "SELL"
                         
+                        # Store signal data for saving (matching reference format)
+                        signal_data = {
+                            'timestamp': datetime.now().isoformat(),
+                            'datetime': str(latest_bar.get('datetime', '')),
+                            'signal': latest_bar['signal'],
+                            'entry_price': latest_bar.get('entry_price', 0),
+                            'stop_loss': latest_bar.get('stop_loss', 0),
+                            'take_profit': latest_bar.get('target_price', 0),
+                            'risk_reward': self.config['strategy']['risk_reward_ratio']
+                        }
+                        self.signals_data.append(signal_data)
+                        
                         print(f"\n🚨 [{datetime.now().strftime('%H:%M:%S')}] NEW SIGNAL #{self.signal_count}: {signal_type}")
                         print(f"   💰 Entry: ${latest_bar.get('entry_price', 0):.2f}")
                         print(f"   🛡️  Stop: ${latest_bar.get('stop_loss', 0):.2f}")
@@ -249,11 +263,21 @@ class PatientLabelsSystem:
         # Save data if configured
         if self.config['output']['save_data'] and self.buffer and len(self.buffer.df) > 0:
             output_dir = Path(self.config['output']['directory'])
-            output_dir.mkdir(exist_ok=True)
+            output_dir.mkdir(parents=True, exist_ok=True)
             
             data_file = output_dir / f"{self.config['data_source']}_data.csv"
             self.buffer.to_csv(str(data_file))
             logger.info(f"💾 Data saved to {data_file}")
+        
+        # Save signals if configured
+        if self.config['output']['save_signals'] and self.signals_data:
+            output_dir = Path(self.config['output']['directory'])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            signals_df = pd.DataFrame(self.signals_data)
+            signals_file = output_dir / f"{self.config['data_source']}_signals.csv"
+            signals_df.to_csv(str(signals_file), index=False)
+            logger.info(f"🚨 Signals saved to {signals_file}")
         
         self._display_summary()
     
