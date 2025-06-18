@@ -1,0 +1,35 @@
+{
+  "_comment": "Patient Labels Trading System Configuration",
+  "_switch_data_source": "Change 'data_source' to 'csv' or 'polygon'",
+  "data_source": "polygon",
+  "csv": {
+    "file_path": "data/QQQ_5min_2025-05-01_to_2025-05-01.csv",
+    "speed": 10.0,
+    "symbol": "QQQ"
+  },
+  "polygon": {
+    "api_key": "R0jSMnnnhxzvbqDFXMbiaJpCyDUwUHod",
+    "symbols": [
+      "QQQ"
+    ],
+    "timeframe": "1minute",
+    "data_type": "auto"
+  },
+  "strategy": {
+    "risk_reward_ratio": 1.0,
+    "cycles_required": 3,
+    "display_duration": 5,
+    "use_hod_lod_breaks": true,
+    "use_confirmed_swings": true,
+    "preserve_dominant_trend": true,
+    "session_start_time": "09:30",
+    "session_end_time": "16:00",
+    "session_timezone": "America/New_York",
+    "strategy_buffer": 0.1
+  },
+  "output": {
+    "directory": "output",
+    "save_data": true,
+    "save_signals": true
+  }
+}
