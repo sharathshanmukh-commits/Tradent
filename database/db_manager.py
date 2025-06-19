@@ -186,10 +186,29 @@ class DatabaseManager:
             def safe_bool(value):
                 return bool(value) if pd.notna(value) else False
             
-            # Parse datetime
-            timestamp = result_row['datetime']
+            # Parse datetime - handle various datetime types and column naming from merge
+            timestamp = None
+            
+            # Try different datetime column names (due to DataFrame merges)
+            for dt_col in ['datetime', 'datetime_x', 'datetime_y']:
+                if dt_col in result_row:
+                    timestamp = result_row[dt_col]
+                    break
+            
+            if timestamp is None:
+                # If no datetime column, try to get from index if it's a DatetimeIndex
+                if hasattr(result_row, 'name') and result_row.name is not None:
+                    timestamp = result_row.name
+                else:
+                    raise ValueError("No datetime found in result_row")
+            
             if isinstance(timestamp, str):
                 timestamp = pd.to_datetime(timestamp)
+            elif hasattr(timestamp, 'to_pydatetime'):
+                # Handle pandas Timestamp
+                timestamp = timestamp.to_pydatetime()
+            elif isinstance(timestamp, pd.Timestamp):
+                timestamp = timestamp.to_pydatetime()
             
             async with self.pool.acquire() as conn:
                 await conn.execute("""
@@ -203,12 +222,12 @@ class DatabaseManager:
                             $15, $16, $17, $18, $19, $20, $21, $22, $23)
                 """, 
                 timestamp,
-                result_row.get('symbol', 'QQQ'),
-                safe_float(result_row.get('open')),
-                safe_float(result_row.get('high')),
-                safe_float(result_row.get('low')),
-                safe_float(result_row.get('close')),
-                safe_int(result_row.get('volume')),
+                result_row.get('symbol', result_row.get('symbol_x', result_row.get('symbol_y', 'QQQ'))),
+                safe_float(result_row.get('open', result_row.get('open_x', result_row.get('open_y')))),
+                safe_float(result_row.get('high', result_row.get('high_x', result_row.get('high_y')))),
+                safe_float(result_row.get('low', result_row.get('low_x', result_row.get('low_y')))),
+                safe_float(result_row.get('close', result_row.get('close_x', result_row.get('close_y')))),
+                safe_int(result_row.get('volume', result_row.get('volume_x', result_row.get('volume_y')))),
                 safe_int(result_row.get('trend_state', 0)),
                 safe_float(result_row.get('up_patient_high')),
                 safe_float(result_row.get('down_patient_low')),
@@ -236,16 +255,38 @@ class DatabaseManager:
             # Generate unique signal ID
             signal_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{signal.get('bar_index', 0)}"
             
-            # Parse datetime
+            # Parse datetime - handle NaT and other edge cases
             signal_datetime = signal['datetime']
-            if isinstance(signal_datetime, str):
-                signal_datetime = pd.to_datetime(signal_datetime)
-            elif hasattr(signal_datetime, 'to_pydatetime'):
-                # Handle pandas Timestamp
-                signal_datetime = signal_datetime.to_pydatetime()
-            elif hasattr(signal_datetime, 'date'):
-                # Handle date objects by converting to datetime
-                signal_datetime = datetime.combine(signal_datetime, datetime.min.time())
+            
+            # More comprehensive NaT detection
+            try:
+                # Check for various NaT representations
+                if (pd.isna(signal_datetime) or 
+                    str(signal_datetime) == 'NaT' or 
+                    (hasattr(signal_datetime, '_value') and pd.isna(signal_datetime))):
+                    logger.warning(f"Signal datetime is NaT ({type(signal_datetime)}, value: {signal_datetime}), using current time instead")
+                    signal_datetime = datetime.now()
+                elif isinstance(signal_datetime, str):
+                    signal_datetime = pd.to_datetime(signal_datetime)
+                elif hasattr(signal_datetime, 'to_pydatetime'):
+                    # Handle pandas Timestamp - check if it's NaT first
+                    if pd.isna(signal_datetime):
+                        logger.warning(f"Signal datetime is NaT, using current time instead")
+                        signal_datetime = datetime.now()
+                    else:
+                        signal_datetime = signal_datetime.to_pydatetime()
+                elif isinstance(signal_datetime, pd.Timestamp):
+                    if pd.isna(signal_datetime):
+                        logger.warning(f"Signal datetime is NaT, using current time instead")
+                        signal_datetime = datetime.now()
+                    else:
+                        signal_datetime = signal_datetime.to_pydatetime()
+                elif hasattr(signal_datetime, 'date'):
+                    # Handle date objects by converting to datetime
+                    signal_datetime = datetime.combine(signal_datetime, datetime.min.time())
+            except Exception as dt_error:
+                logger.warning(f"Error parsing signal datetime {signal_datetime} ({type(signal_datetime)}): {dt_error}. Using current time.")
+                signal_datetime = datetime.now()
             
             async with self.pool.acquire() as conn:
                 await conn.execute("""

@@ -249,23 +249,33 @@ class PatientLabelsSystemWithDatabase:
         self.signal_count += 1
         signal_type = "BUY" if signal_bar['signal'] > 0 else "SELL"
         
-        # Create signal data
-        signal_datetime = signal_bar.get('datetime', '')
-        if hasattr(signal_datetime, 'isoformat'):
-            signal_datetime = signal_datetime.isoformat()
-        elif isinstance(signal_datetime, str):
-            signal_datetime = pd.to_datetime(signal_datetime).isoformat()
-        
-        signal_data = {
-            'bar_index': signal_bar.name,  # DataFrame index
-            'datetime': signal_datetime,
-            'type': signal_type.lower(),
-            'entry_price': signal_bar.get('entry_price', 0),
-            'stop_loss': signal_bar.get('stop_loss', 0),
-            'target_price': signal_bar.get('target_price', 0),
-            'risk_reward_ratio': self.config['strategy']['risk_reward_ratio'],
-            'reason': f'Patient Labels {signal_type} signal'
-        }
+        # Get the actual signal object from strategy instead of reconstructing from DataFrame
+        strategy_signals = self.strategy.get_signals()
+        if strategy_signals:
+            # Use the latest signal object which has the correct datetime
+            latest_signal = strategy_signals[-1]
+            signal_data = latest_signal.copy()  # Use the strategy's signal directly
+            # Ensure datetime is properly formatted
+            if hasattr(signal_data['datetime'], 'isoformat'):
+                signal_data['datetime'] = signal_data['datetime'].isoformat()
+        else:
+            # Fallback to DataFrame extraction (previous method) 
+            signal_datetime = signal_bar.get('datetime', '')
+            if hasattr(signal_datetime, 'isoformat'):
+                signal_datetime = signal_datetime.isoformat()
+            elif isinstance(signal_datetime, str):
+                signal_datetime = pd.to_datetime(signal_datetime).isoformat()
+            
+            signal_data = {
+                'bar_index': signal_bar.name,  # DataFrame index
+                'datetime': signal_datetime,
+                'type': signal_type.lower(),
+                'entry_price': signal_bar.get('entry_price', 0),
+                'stop_loss': signal_bar.get('stop_loss', 0),
+                'target_price': signal_bar.get('target_price', 0),
+                'risk_reward_ratio': self.config['strategy']['risk_reward_ratio'],
+                'reason': f'Patient Labels {signal_type} signal'
+            }
         
         # Create market snapshot (last 20 bars + context)
         # Convert pandas Timestamps to ISO format strings for JSON serialization

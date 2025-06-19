@@ -212,8 +212,13 @@ class PatientLabelsStrategy(BaseStrategy):
         Returns:
             DataFrame with added signal columns
         """
-        # Make a copy to avoid modifying the original DataFrame
+        # Make a copy to avoid modifying the original DataFrame and merge with patient_labels_result
         result = data.copy()
+        
+        # Merge with patient labels analysis data to include up_patient_high, down_patient_low, etc.
+        if patient_labels_result is not None and not patient_labels_result.empty:
+            # Merge on index to include all patient labels analysis columns
+            result = result.merge(patient_labels_result, left_index=True, right_index=True, how='left')
         
         # Add signal columns
         result['signal'] = 0  # 1=buy, -1=sell, 0=none
@@ -290,7 +295,7 @@ class PatientLabelsStrategy(BaseStrategy):
             
             # Initial buy signal - MATCHING PINE SCRIPT LOGIC
             if self.waiting_for_patient_break_up and up_patient_break and not self.had_initial_patient_break_up:
-                signal = self._generate_buy_signal(i, price_data, "initial_up_patient_break")
+                signal = self._generate_buy_signal(i, price_data, "initial_up_patient_break", current_datetime)
                 self.signals.append(signal)
                 
                 # Update result DataFrame
@@ -305,7 +310,7 @@ class PatientLabelsStrategy(BaseStrategy):
             
             # Initial sell signal - MATCHING PINE SCRIPT LOGIC
             elif self.waiting_for_patient_break_down and down_patient_break and not self.had_initial_patient_break_down:
-                signal = self._generate_sell_signal(i, price_data, "initial_down_patient_break")
+                signal = self._generate_sell_signal(i, price_data, "initial_down_patient_break", current_datetime)
                 self.signals.append(signal)
                 
                 # Update result DataFrame
@@ -320,7 +325,7 @@ class PatientLabelsStrategy(BaseStrategy):
             
             # Additional buy signals - require confirmed uptrend state
             elif self.initial_entry_done and trend_state == 1 and up_patient_break:
-                signal = self._generate_buy_signal(i, price_data, "additional_up_patient_break")
+                signal = self._generate_buy_signal(i, price_data, "additional_up_patient_break", current_datetime)
                 self.signals.append(signal)
                 
                 # Update result DataFrame
@@ -331,7 +336,7 @@ class PatientLabelsStrategy(BaseStrategy):
             
             # Additional sell signals - require confirmed downtrend state
             elif self.initial_entry_done and trend_state == -1 and down_patient_break:
-                signal = self._generate_sell_signal(i, price_data, "additional_down_patient_break")
+                signal = self._generate_sell_signal(i, price_data, "additional_down_patient_break", current_datetime)
                 self.signals.append(signal)
                 
                 # Update result DataFrame
@@ -382,7 +387,7 @@ class PatientLabelsStrategy(BaseStrategy):
         self.had_initial_patient_break_up = False
         self.had_initial_patient_break_down = False
     
-    def _generate_buy_signal(self, bar_index, price_data, reason):
+    def _generate_buy_signal(self, bar_index, price_data, reason, market_datetime=None):
         """Generate a buy signal at the current bar."""
         raw_entry_price = self.last_valid_up_patient_high
         
@@ -413,13 +418,22 @@ class PatientLabelsStrategy(BaseStrategy):
             'reason': reason
         }
         
-        # Add datetime if available
-        if hasattr(price_data, 'datetime') or 'datetime' in price_data:
-            signal['datetime'] = price_data['datetime']
+        # Add datetime - prefer market_datetime parameter, fallback to price_data
+        if market_datetime is not None:
+            signal['datetime'] = market_datetime
+        elif hasattr(price_data, 'datetime') or 'datetime' in price_data:
+            dt_value = price_data['datetime']
+            if pd.isna(dt_value):
+                # Use current time if datetime is NaT
+                signal['datetime'] = pd.Timestamp.now()
+            else:
+                signal['datetime'] = dt_value
+        else:
+            signal['datetime'] = pd.Timestamp.now()
         
         return signal
     
-    def _generate_sell_signal(self, bar_index, price_data, reason):
+    def _generate_sell_signal(self, bar_index, price_data, reason, market_datetime=None):
         """Generate a sell signal at the current bar."""
         raw_entry_price = self.last_valid_down_patient_low
         
@@ -450,8 +464,17 @@ class PatientLabelsStrategy(BaseStrategy):
             'reason': reason
         }
         
-        # Add datetime if available
-        if hasattr(price_data, 'datetime') or 'datetime' in price_data:
-            signal['datetime'] = price_data['datetime']
+        # Add datetime - prefer market_datetime parameter, fallback to price_data
+        if market_datetime is not None:
+            signal['datetime'] = market_datetime
+        elif hasattr(price_data, 'datetime') or 'datetime' in price_data:
+            dt_value = price_data['datetime']
+            if pd.isna(dt_value):
+                # Use current time if datetime is NaT
+                signal['datetime'] = pd.Timestamp.now()
+            else:
+                signal['datetime'] = dt_value
+        else:
+            signal['datetime'] = pd.Timestamp.now()
         
         return signal 
