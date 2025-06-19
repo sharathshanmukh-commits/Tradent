@@ -1,0 +1,107 @@
+{
+  "_comment": "Data Source Configuration for Trading System",
+  "_description": "This file configures the data source abstraction layer. Change the 'type' field to switch between data sources.",
+  
+  "data_source": {
+    "_comment_type": "Supported types: 'csv', 'polygon'",
+    "type": "polygon",
+    
+    "_comment_csv": "CSV data source configuration - reads historical data from CSV files",
+    "csv": {
+      "_comment_file_path": "Path to CSV file containing OHLCV data",
+      "file_path": "data/QQQ_5min_2025-05-01_to_2025-05-01.csv",
+      
+      "_comment_speed": "Speed multiplier for streaming (higher = faster, 1.0 = real-time, 10.0 = 10x faster)",
+      "speed": 10.0,
+      
+      "_comment_delay_ms": "Base delay between bars in milliseconds (modified by speed)",
+      "delay_ms": 100,
+      
+      "_comment_symbol": "Symbol override (if not provided, attempts to detect from filename or data)",
+      "symbol": "QQQ"
+    },
+    
+    "_comment_polygon": "Polygon.io data source configuration - streams live market data",
+    "polygon": {
+      "_comment_api_key": "Your Polygon.io API key (required for real-time data)",
+      "api_key": "R0jSMnnnhxzvbqDFXMbiaJpCyDUwUHod",
+      
+      "_comment_symbols": "List of symbols to subscribe to",
+      "symbols": ["QQQ"],
+      
+      "_comment_subscription_types": "Data types to subscribe to: A=aggregates, T=trades, Q=quotes",
+      "subscription_types": ["A"],
+      
+      "_comment_timeframe": "Timeframe for aggregates (1minute for faster signals)",
+      "timeframe": "1minute",
+      
+      "_comment_data_type": "Data feed type: 'realtime', 'delayed', or 'auto' (auto-detect subscription level)",
+      "data_type": "auto",
+      
+      "_comment_reconnect": "Connection retry settings",
+      "reconnect_attempts": 3,
+      "reconnect_delay_ms": 5000
+    }
+  },
+  
+  "_usage_examples": {
+    "_comment": "Example configurations for different scenarios",
+    
+    "csv_fast_testing": {
+      "type": "csv",
+      "csv": {
+        "file_path": "test_data/sample_QQQ.csv",
+        "speed": 50.0,
+        "delay_ms": 20,
+        "symbol": "QQQ"
+      }
+    },
+    
+    "csv_realtime_simulation": {
+      "type": "csv",
+      "csv": {
+        "file_path": "data/historical/SPY_1min.csv",
+        "speed": 1.0,
+        "delay_ms": 60000,
+        "symbol": "SPY"
+      }
+    },
+    
+    "polygon_live_trading": {
+      "type": "polygon",
+      "polygon": {
+        "api_key": "your_actual_api_key",
+        "symbols": ["QQQ"],
+        "subscription_types": ["A"],
+        "reconnect_attempts": 5,
+        "reconnect_delay_ms": 3000
+      }
+    }
+  },
+  
+  "_csv_column_formats": {
+    "_comment": "The CSV data source supports various column name formats",
+    "supported_datetime_columns": ["datetime", "date", "time", "timestamp", "dt"],
+    "supported_ohlc_columns": {
+      "open": ["open", "Open", "o"],
+      "high": ["high", "High", "h"],
+      "low": ["low", "Low", "l"],
+      "close": ["close", "Close", "c"]
+    },
+    "supported_volume_columns": ["volume", "Volume", "vol", "v"],
+    "example_csv_header": "datetime,open,high,low,close,volume"
+  },
+  
+  "_standard_bar_format": {
+    "_comment": "All data sources output data in this standardized format",
+    "symbol": "QQQ",
+    "datetime": "2025-01-15T10:30:00-05:00",
+    "open": 150.25,
+    "high": 150.75,
+    "low": 150.10,
+    "close": 150.50,
+    "volume": 1000000,
+    "source": "csv",
+    "timestamp_received": "2025-01-15T10:30:01.123456"
+  }
+}

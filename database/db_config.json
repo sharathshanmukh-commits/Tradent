@@ -1,0 +1,12 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "tradent_live",
+    "user": "tradent_user",
+    "password": "TradentSecure2024!",
+    "pool_min_size": 5,
+    "pool_max_size": 20,
+    "command_timeout": 60
+  }
+}

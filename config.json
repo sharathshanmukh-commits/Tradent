@@ -28,6 +28,10 @@
     "session_timezone": "America/New_York",
     "strategy_buffer": 0.1
   },
+  "database": {
+    "enabled": true,
+    "save_backups": true
+  },
   "output": {
     "directory": "output",
     "save_data": true,
