@@ -94,25 +94,25 @@ def format_signal_data(
     for i, row in recent_pl_data.iterrows():
         rel_bar = row['relative_bar']
         
-        # Translate trend state to text
-        trend_state = row['trend_state']
+        # Translate trend state to text (with fallback if missing)
+        trend_state = row.get('trend_state', 0)  # Default to 0 (NEUTRAL) if missing
         trend_text = "NEUTRAL"
         if trend_state == 1:
             trend_text = "UPTREND"
         elif trend_state == -1:
             trend_text = "DOWNTREND"
         
-        # Get uptrend/downtrend flags
+        # Get uptrend/downtrend flags (with fallbacks)
         in_uptrend = str(row.get('in_uptrend', "N/A"))
         in_downtrend = str(row.get('in_downtrend', "N/A"))
         up_down = f"{in_uptrend}/{in_downtrend}"
         
-        # Get swing cycles
+        # Get swing cycles (with fallbacks)
         up_cycle = row.get('up_swing_cycle', 0)
         down_cycle = row.get('down_swing_cycle', 0)
         cycles = f"{up_cycle}/{down_cycle}"
         
-        # Check for patient candles
+        # Check for patient candles (with fallbacks)
         patient_text = ""
         if 'up_patient_high' in row and not pd.isna(row['up_patient_high']):
             patient_text += "UP "
@@ -128,22 +128,24 @@ def format_signal_data(
     pl_section += "\nTrend Changes:\n"
     trend_changes = []
     for i in range(1, len(recent_pl_data)):
-        if recent_pl_data.iloc[i]['trend_state'] != recent_pl_data.iloc[i-1]['trend_state']:
-            from_state = recent_pl_data.iloc[i-1]['trend_state']
-            to_state = recent_pl_data.iloc[i]['trend_state']
+        # Use .get() with fallbacks for trend_state
+        current_trend = recent_pl_data.iloc[i].get('trend_state', 0)
+        prev_trend = recent_pl_data.iloc[i-1].get('trend_state', 0)
+        
+        if current_trend != prev_trend:
             rel_bar = recent_pl_data.iloc[i]['relative_bar']
             
             # Convert numeric states to text
             from_text = "NEUTRAL"
-            if from_state == 1:
+            if prev_trend == 1:
                 from_text = "UPTREND"
-            elif from_state == -1:
+            elif prev_trend == -1:
                 from_text = "DOWNTREND"
                 
             to_text = "NEUTRAL"
-            if to_state == 1:
+            if current_trend == 1:
                 to_text = "UPTREND"
-            elif to_state == -1:
+            elif current_trend == -1:
                 to_text = "DOWNTREND"
                 
             trend_changes.append(f"  Bar {rel_bar}: {from_text} → {to_text}")

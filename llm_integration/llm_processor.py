@@ -9,12 +9,14 @@ import time
 import asyncio
 import logging
 import json
+import uuid
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import os
 from collections import deque
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.genai import types
 from choppiness_agent.adk_agent import get_agent, TradingSignal
 
 logger = logging.getLogger(__name__)
@@ -59,14 +61,19 @@ class LLMProcessor:
         # Initialize the agent and runner
         self.agent = get_agent()
         self.session_service = InMemorySessionService()
+        self.app_name = "tradent_trading_system"
+        self.user_id = "trader_1"
         self.runner = Runner(
-            app_name="tradent_trading_system",
+            app_name=self.app_name,
             agent=self.agent, 
             session_service=self.session_service
         )
         
-        # Create a session for this processor
-        self.session_id = f"trading_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Create base session ID for this processor instance
+        self.base_session_id = str(uuid.uuid4())
+        
+        # Track created sessions
+        self.created_sessions = set()
         
         # Local rate limiting tracking
         self.request_history = deque()
@@ -111,12 +118,13 @@ class LLMProcessor:
         
         return True, 0
     
-    async def rate_limited_api_call(self, formatted_signal: str, signal_index: int = 0) -> Dict:
+    async def rate_limited_api_call(self, formatted_signal: str, session_id: str, signal_index: int = 0) -> Dict:
         """
         Make a rate-limited API call to the LLM using the Agent.
         
         Args:
             formatted_signal: Formatted signal text for LLM
+            session_id: Session ID to use for the call
             signal_index: Index for logging purposes
             
         Returns:
@@ -139,7 +147,7 @@ class LLMProcessor:
         
         # Make the API call with retry logic
         try:
-            response = await self._make_api_call_with_retry(formatted_signal, signal_index)
+            response = await self._make_api_call_with_retry(formatted_signal, session_id, signal_index)
             
             # Update token usage based on actual usage if available
             # Note: ADK doesn't provide usage stats directly, so we keep the estimate
@@ -150,12 +158,13 @@ class LLMProcessor:
             logger.error(f"Signal {signal_index}: API call failed: {str(e)}")
             raise
     
-    async def _make_api_call_with_retry(self, formatted_signal: str, signal_index: int) -> Dict:
+    async def _make_api_call_with_retry(self, formatted_signal: str, session_id: str, signal_index: int) -> Dict:
         """
         Make the actual API call using the Agent with exponential backoff retry.
         
         Args:
             formatted_signal: Formatted signal text
+            session_id: Session ID to use for the call
             signal_index: Signal index for logging
             
         Returns:
@@ -166,25 +175,40 @@ class LLMProcessor:
         
         while retries < MAX_RETRIES:
             try:
-                logger.debug(f"Signal {signal_index}: Making API call using Google ADK Agent")
+                logger.debug(f"[LLM] Signal text length: {len(formatted_signal)} chars")
+                logger.debug(f"Signal {signal_index}: Making API call using Google ADK Agent with session {session_id}")
                 
-                # Use the runner to send message to the agent
-                # Run in executor since the ADK might not be async
-                response = await asyncio.to_thread(
-                    self.runner.invoke,
-                    formatted_signal,
-                    config={"session": self.session_id}
+                # Create proper message format
+                new_message = types.Content(
+                    role="user",
+                    parts=[types.Part(text=formatted_signal)]
                 )
+                
+                # Use the runner with proper session management
+                response_content = None
+                
+                # Run the agent synchronously and collect the final response
+                def run_agent():
+                    for event in self.runner.run(
+                        user_id=self.user_id,
+                        session_id=session_id,
+                        new_message=new_message
+                    ):
+                        if event.is_final_response():
+                            if event.content and event.content.parts:
+                                return event.content.parts[0].text
+                    return None
+                
+                # Run in executor since the ADK runner is synchronous
+                response_content = await asyncio.to_thread(run_agent)
                 
                 logger.info(f"Signal {signal_index}: Successfully received LLM response")
                 
-                # Parse the response
-                if hasattr(response, 'content'):
-                    content = response.content
-                elif hasattr(response, 'text'):
-                    content = response.text
-                else:
-                    content = str(response)
+                # Use the response content
+                if not response_content:
+                    raise Exception("No response content received from agent")
+                
+                content = response_content
                 
                 # Try to parse as JSON
                 try:
@@ -224,13 +248,114 @@ class LLMProcessor:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, MAX_RETRY_DELAY)
     
-    async def process_signal(self, formatted_signal: str, signal_id: str) -> Dict:
+    async def get_or_create_date_session(self, signal_timestamp: Optional[datetime] = None) -> str:
+        """
+        Get or create a session for the given signal timestamp's date.
+        
+        Args:
+            signal_timestamp: Timestamp of the signal (defaults to now)
+            
+        Returns:
+            Session ID for the date
+        """
+        if signal_timestamp is None:
+            signal_timestamp = datetime.now()
+        
+        # Create date key
+        date_key = signal_timestamp.strftime('%Y-%m-%d')
+        date_session_id = f"{self.base_session_id}_{date_key}"
+        
+        # Create session if it doesn't exist
+        if date_session_id not in self.created_sessions:
+            try:
+                initial_state = {
+                    "signals_analyzed": 0,
+                    "last_signal_type": None,
+                    "trading_date": date_key
+                }
+                
+                await self.session_service.create_session(
+                    session_id=date_session_id,
+                    user_id=self.user_id,
+                    app_name=self.app_name,
+                    state=initial_state
+                )
+                
+                self.created_sessions.add(date_session_id)
+                logger.info(f"Created new session: {date_session_id} for date {date_key}")
+                
+            except Exception as e:
+                logger.error(f"Failed to create session {date_session_id}: {str(e)}")
+                raise
+        
+        return date_session_id
+    
+    def _update_session_state(self, session_id: str, signal_id: str) -> None:
+        """
+        Update session state after processing a signal.
+        
+        Args:
+            session_id: Session ID to update
+            signal_id: Signal ID that was processed
+        """
+        try:
+            # Get current session
+            session = self.session_service.get_session(session_id)
+            if session and session.state:
+                # Update state
+                session.state["signals_analyzed"] = session.state.get("signals_analyzed", 0) + 1
+                session.state["last_signal_id"] = signal_id
+                session.state["last_updated"] = datetime.now().isoformat()
+                
+                logger.debug(f"Updated session {session_id} state: {session.state}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to update session state for {session_id}: {str(e)}")
+    
+    def cleanup_old_sessions(self, days_to_keep: int = 7) -> int:
+        """
+        Clean up sessions older than specified days.
+        
+        Args:
+            days_to_keep: Number of days to keep sessions
+            
+        Returns:
+            Number of sessions cleaned up
+        """
+        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+        cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
+        
+        sessions_to_remove = []
+        for session_id in self.created_sessions:
+            # Extract date from session ID
+            if '_' in session_id:
+                date_part = session_id.split('_')[-1]
+                if date_part < cutoff_date_str:
+                    sessions_to_remove.append(session_id)
+        
+        # Remove old sessions
+        for session_id in sessions_to_remove:
+            try:
+                # Note: InMemorySessionService doesn't have a delete method
+                # Sessions will be garbage collected when the service is recreated
+                self.created_sessions.discard(session_id)
+                logger.debug(f"Marked session {session_id} for cleanup")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup session {session_id}: {str(e)}")
+        
+        if sessions_to_remove:
+            logger.info(f"Cleaned up {len(sessions_to_remove)} old sessions")
+        
+        return len(sessions_to_remove)
+    
+    async def process_signal(self, formatted_signal: str, signal_id: str, signal_timestamp: Optional[datetime] = None) -> Dict:
         """
         Process a single signal through the LLM.
         
         Args:
             formatted_signal: Pre-formatted signal text
             signal_id: Signal identifier
+            signal_timestamp: Timestamp of the signal (defaults to now)
             
         Returns:
             Dictionary with LLM results and metadata
@@ -238,14 +363,20 @@ class LLMProcessor:
         start_time = time.time()
         
         try:
+            # Get or create session for the signal's date
+            session_id = await self.get_or_create_date_session(signal_timestamp)
+            
             # Make the API call
-            response = await self.rate_limited_api_call(formatted_signal, signal_index=0)
+            response = await self.rate_limited_api_call(formatted_signal, session_id, signal_index=0)
             
             # Extract the content
             content = response['choices'][0]['message']['content']
             
             # Calculate processing time
             processing_time_ms = int((time.time() - start_time) * 1000)
+            
+            # Update session state
+            self._update_session_state(session_id, signal_id)
             
             return {
                 'success': True,
@@ -254,7 +385,8 @@ class LLMProcessor:
                 'llm_raw_response': response,
                 'llm_model_used': self.model,
                 'processing_time_ms': processing_time_ms,
-                'processed_at': datetime.now()
+                'processed_at': datetime.now(),
+                'session_id': session_id
             }
             
         except Exception as e:
@@ -336,4 +468,6 @@ class LLMProcessor:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
+        # Perform cleanup of old sessions
+        self.cleanup_old_sessions()
         pass

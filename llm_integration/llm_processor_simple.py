@@ -112,13 +112,32 @@ class SimpleLLMProcessor:
         token_usage_this_minute += ESTIMATED_TOKENS_PER_REQUEST
         request_timestamps.append(time.time())
 
-    def rate_limited_api_call(self, formatted_signal: str, signal_index: int) -> str:
-        """Make API call with rate limiting and backoff (matching reference)"""
+    async def rate_limited_api_call_async(self, formatted_signal: str, signal_index: int) -> str:
+        """Make API call with rate limiting and backoff (properly async version)"""
         # Check rate limits before making the call
         self.check_and_apply_rate_limits(signal_index)
         
         # Create session ID for this signal
         session_id = f"{self.base_session_id}_signal_{signal_index}"
+        
+        # ✅ CREATE SESSION BEFORE USING IT (properly async)
+        initial_state = {
+            "signals_analyzed": 0,
+            "last_signal_type": None,
+            "signal_index": signal_index
+        }
+        
+        try:
+            # Create the session using await (since it's async)
+            await self.session_service.create_session(
+                session_id=session_id,
+                user_id=self.user_id,
+                app_name=self.app_name,
+                state=initial_state
+            )
+            print(f"[LLM] ✅ Created async session: {session_id}")
+        except Exception as e:
+            print(f"[LLM] Session creation error (may already exist): {str(e)}")
         
         # Retry logic with exponential backoff
         retries = 0
@@ -136,7 +155,8 @@ class SimpleLLMProcessor:
                 print(f"[LLM] User ID: {self.user_id}")
                 print(f"[LLM] Signal text length: {len(formatted_signal)} chars")
                 
-                for event in self.runner.run(
+                # Use the async runner
+                async for event in self.runner.run_async(
                     user_id=self.user_id,
                     session_id=session_id,
                     new_message=new_message,
@@ -166,6 +186,7 @@ class SimpleLLMProcessor:
                             }
                             
                             log_file = f"test_run/llm_call_{signal_index}.json"
+                            os.makedirs("test_run", exist_ok=True)
                             with open(log_file, 'w') as f:
                                 json.dump(log_data, f, indent=2, default=str)
                             print(f"[LLM] Saved detailed log to {log_file}")
@@ -180,7 +201,8 @@ class SimpleLLMProcessor:
                         retry_delay = min(INITIAL_RETRY_DELAY * (2 ** retries), MAX_RETRY_DELAY)
                         
                         print(f"Rate limit exceeded for signal {signal_index}. Retry {retries+1}/{MAX_RETRIES} after {retry_delay:.1f}s")
-                        time.sleep(retry_delay)
+                        import asyncio
+                        await asyncio.sleep(retry_delay)
                         retries += 1
                         # Remove the timestamp of the failed request
                         if request_timestamps:
@@ -198,6 +220,27 @@ class SimpleLLMProcessor:
                 return f"Analysis failed due to unexpected error: {str(e)}"
         
         return analysis_result
+
+    def rate_limited_api_call(self, formatted_signal: str, signal_index: int) -> str:
+        """Sync wrapper for the async API call"""
+        import asyncio
+        
+        try:
+            # Check if we're already in an event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context, can't create new loop
+                raise RuntimeError("Cannot create new event loop from async context - use await instead")
+            except RuntimeError:
+                # No loop running, safe to create one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(self.rate_limited_api_call_async(formatted_signal, signal_index))
+                loop.close()
+                return result
+        except Exception as e:
+            print(f"Error in sync wrapper: {str(e)}")
+            return f"Analysis failed due to async error: {str(e)}"
 
     def extract_json_data(self, analysis_text: str) -> Dict:
         """Extract JSON data from analysis text (matching reference)"""
@@ -252,13 +295,14 @@ class SimpleLLMProcessor:
             "overall_analysis": analysis
         }
 
-    async def process_signal(self, formatted_signal: str, signal_id: str) -> Dict:
+    async def process_signal(self, formatted_signal: str, signal_id: str, signal_timestamp: str = None) -> Dict:
         """
-        Process a single signal through the LLM (maintaining async interface for compatibility).
+        Process a single signal through the LLM (properly async version).
         
         Args:
             formatted_signal: Pre-formatted signal text
             signal_id: Signal identifier
+            signal_timestamp: Signal timestamp (for compatibility, not used)
             
         Returns:
             Dictionary with LLM results and metadata
@@ -269,8 +313,11 @@ class SimpleLLMProcessor:
             # Extract signal index from signal_id for rate limiting
             signal_index = hash(signal_id) % 10000  # Simple way to get a number
             
-            # Make the API call using simple pattern
-            llm_response = self.rate_limited_api_call(formatted_signal, signal_index)
+            # Store the session_id we'll create for this signal
+            session_id = f"{self.base_session_id}_signal_{signal_index}"
+            
+            # Make the async API call directly (no sync wrapper needed)
+            llm_response = await self.rate_limited_api_call_async(formatted_signal, signal_index)
             
             if llm_response.startswith("Analysis failed"):
                 raise Exception(llm_response)
@@ -291,6 +338,7 @@ class SimpleLLMProcessor:
             return {
                 'success': True,
                 'signal_id': signal_id,
+                'session_id': session_id,  # ✅ ENSURE session_id is returned
                 'llm_response': json.dumps(result),
                 'llm_raw_response': {'choices': [{'message': {'content': llm_response}}]},
                 'llm_model_used': self.model,
@@ -301,9 +349,14 @@ class SimpleLLMProcessor:
         except Exception as e:
             logger.error(f"Failed to process signal {signal_id}: {str(e)}")
             
+            # Also ensure session_id is returned in error case
+            signal_index = hash(signal_id) % 10000
+            session_id = f"{self.base_session_id}_signal_{signal_index}"
+            
             return {
                 'success': False,
                 'signal_id': signal_id,
+                'session_id': session_id,  # ✅ ENSURE session_id is returned even on error
                 'error': str(e),
                 'llm_model_used': self.model,
                 'processing_time_ms': int((time.time() - start_time) * 1000),

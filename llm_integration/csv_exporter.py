@@ -15,6 +15,8 @@ import logging
 import os
 import fcntl
 import json
+import csv
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,16 @@ class LLMCSVExporter:
         
         # Initialize CSV files with headers if they don't exist
         self._initialize_csv_files()
+        
+        # Continuous CSV settings
+        self.continuous_csv_filename = "continuous_llm_signals.csv"
+        self.csv_fieldnames = [
+            'signal_id', 'timestamp', 'symbol', 'signal_type', 
+            'entry_price', 'stop_loss', 'target_price', 'risk_reward_ratio',
+            'reason', 'market_close', 'market_volume',
+            'llm_rating', 'llm_choppiness', 'llm_analysis', 
+            'llm_model', 'processing_time_ms', 'processed_at'
+        ]
         
         logger.info(f"LLMCSVExporter initialized with output directory: {self.output_dir}")
     
@@ -181,39 +193,59 @@ class LLMCSVExporter:
             logger.error(f"Error exporting strategy results to CSV: {str(e)}")
             raise
     
-    def append_to_continuous_csv(self, signal_data: Dict) -> None:
+    def append_to_continuous_csv(self, enhanced_signal: Dict) -> None:
         """
-        Continuously append a single enhanced signal to the CSV files.
+        Append an enhanced signal to the continuous CSV file.
         
         Args:
-            signal_data: Single signal dictionary with LLM results
+            enhanced_signal: Enhanced signal data with LLM results
         """
         try:
-            # Format the signal row
-            row = self._format_signal_row(signal_data)
-            if not row:
-                return
+            # Extract data for CSV row
+            signal_data = enhanced_signal.get('signal_data', {})
+            market_snapshot = enhanced_signal.get('market_snapshot', {})
+            llm_result = enhanced_signal.get('llm_result', {})
             
-            # Create single-row DataFrame
-            df_row = pd.DataFrame([row])
+            row = {
+                'signal_id': enhanced_signal.get('signal_id'),
+                'timestamp': enhanced_signal.get('timestamp'),
+                'symbol': signal_data.get('symbol', 'UNKNOWN'),
+                'signal_type': signal_data.get('type'),
+                'entry_price': signal_data.get('entry_price'),
+                'stop_loss': signal_data.get('stop_loss'),
+                'target_price': signal_data.get('target_price'),
+                'risk_reward_ratio': signal_data.get('risk_reward_ratio'),
+                'reason': signal_data.get('reason'),
+                'market_close': market_snapshot.get('close'),
+                'market_volume': market_snapshot.get('volume'),
+                'llm_rating': llm_result.get('rating'),
+                'llm_choppiness': llm_result.get('choppiness'),
+                'llm_analysis': llm_result.get('analysis', '').replace('\n', ' ').replace(',', ';'),  # Clean for CSV
+                'llm_model': llm_result.get('llm_model_used'),
+                'processing_time_ms': llm_result.get('processing_time_ms'),
+                'processed_at': enhanced_signal.get('processed_at', datetime.now().isoformat())
+            }
             
-            # Ensure columns match
-            for col in self.signal_columns:
-                if col not in df_row.columns:
-                    df_row[col] = None
+            # Create continuous CSV filename
+            csv_filename = os.path.join(self.output_dir, self.continuous_csv_filename)
             
-            df_row = df_row[self.signal_columns]
+            # Write header if file doesn't exist
+            file_exists = os.path.exists(csv_filename)
             
-            # Append to CSV
-            self._append_to_csv_safe(df_row, self.signals_csv_path)
+            with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=self.csv_fieldnames)
+                
+                if not file_exists:
+                    writer.writeheader()
+                    logger.info(f"Created continuous CSV file: {csv_filename}")
+                
+                writer.writerow(row)
             
-            # Also save to test_run for debugging
-            self._append_to_csv_safe(df_row, self.test_signals_csv)
-            
-            logger.debug(f"Appended signal {signal_data.get('signal_id')} to continuous CSV and test_run")
+            logger.debug(f"Appended signal {enhanced_signal.get('signal_id')} to continuous CSV")
             
         except Exception as e:
-            logger.error(f"Error appending to continuous CSV: {str(e)}")
+            logger.error(f"Failed to append signal to CSV: {str(e)}")
+            logger.debug(traceback.format_exc())
     
     def _format_signal_row(self, signal_data: Dict) -> Optional[Dict]:
         """

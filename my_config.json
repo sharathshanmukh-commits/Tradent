@@ -4,7 +4,7 @@
   "data_source": "csv",
   "csv": {
     "file_path": "data/QQQ_5min_2025-05-01_to_2025-05-01.csv",
-    "speed": 10.0,
+    "speed": 1.0,
     "symbol": "QQQ"
   },
   "polygon": {
@@ -35,5 +35,14 @@
     "directory": "output",
     "save_data": true,
     "save_signals": true
+  },
+  "llm": {
+    "enabled": true,
+    "api_key": "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",
+    "model": "openrouter/google/gemini-2.5-flash-preview-05-20",
+    "batch_size": 1,
+    "poll_interval": 1.0,
+    "cleanup_interval_minutes": 30,
+    "max_retries": 3
   }
 }
