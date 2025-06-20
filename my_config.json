@@ -1,15 +1,14 @@
 {
-  "_comment": "Patient Labels Trading System Configuration",
+  "_comment": "Patient Labels Trading System Configuration with Database",
   "_switch_data_source": "Change 'data_source' to 'csv' or 'polygon'",
   "data_source": "csv",
   "csv": {
     "file_path": "data/QQQ_5min_2025-05-01_to_2025-05-01.csv",
-    "speed": 100.0,
-    "symbol": "QQQ",
-    "timezone": "America/New_York"
+    "speed": 10.0,
+    "symbol": "QQQ"
   },
   "polygon": {
-    "api_key": "R0jSMnnnhxzvbqDFXMbiaJpCyDUwUHod",
+    "api_key": "YOUR_POLYGON_API_KEY",
     "symbols": [
       "QQQ"
     ],
@@ -36,22 +35,5 @@
     "directory": "output",
     "save_data": true,
     "save_signals": true
-  },
-  "llm": {
-    "enabled": true,
-    "memory_retention_minutes": 60,
-    "max_memory_signals": 1000,
-    "csv_output_directory": "output/llm_enhanced/",
-    "batch_export_interval_seconds": 60,
-    "model": "google/gemini-2.5-flash",
-    "batch_size": 1,
-    "poll_interval": 1.0,
-    "cleanup_interval_minutes": 30,
-    "max_retries": 3,
-    "lookback_periods": 20,
-    "indicators_to_include": [
-      "rsi", "atr", "sma_20", "sma_50", "volume_ratio",
-      "bb_upper", "bb_lower", "bb_middle", "stochastic_k", "stochastic_d"
-    ]
   }
 }

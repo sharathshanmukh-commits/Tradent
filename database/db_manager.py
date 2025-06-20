@@ -370,3 +370,166 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Failed to get session stats: {e}")
             return {}
+    
+    # LLM Enhancement Methods
+    
+    async def create_llm_enhancement_task(self, signal_id: str, session_id: str) -> str:
+        """Create LLM enhancement task and return task_id"""
+        try:
+            async with self.pool.acquire() as conn:
+                task_id = await conn.fetchval("""
+                    INSERT INTO llm_enhancement_tasks 
+                    (signal_id, session_id, status, created_at)
+                    VALUES ($1, $2, 'pending', NOW())
+                    RETURNING task_id
+                """, signal_id, session_id)
+                
+                logger.debug(f"Created LLM task {task_id} for signal {signal_id}")
+                return str(task_id)
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to create LLM task: {e}")
+            raise
+    
+    async def get_pending_llm_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get pending LLM enhancement tasks"""
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT task_id, signal_id, status, created_at, retry_count
+                    FROM llm_enhancement_tasks 
+                    WHERE status = 'pending'
+                    ORDER BY created_at ASC
+                    LIMIT $1
+                """, limit)
+                
+                return [dict(row) for row in rows]
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get pending LLM tasks: {e}")
+            return []
+    
+    async def update_task_status(self, task_id: str, status: str, error: str = None) -> None:
+        """Update LLM task processing status"""
+        try:
+            async with self.pool.acquire() as conn:
+                if status == 'processing':
+                    await conn.execute("""
+                        UPDATE llm_enhancement_tasks 
+                        SET status = $2, started_at = NOW()
+                        WHERE task_id = $1
+                    """, int(task_id), status)
+                elif status == 'completed':
+                    await conn.execute("""
+                        UPDATE llm_enhancement_tasks 
+                        SET status = $2, completed_at = NOW()
+                        WHERE task_id = $1
+                    """, int(task_id), status)
+                elif status == 'failed':
+                    await conn.execute("""
+                        UPDATE llm_enhancement_tasks 
+                        SET status = $2, completed_at = NOW(), error_message = $3,
+                            retry_count = retry_count + 1
+                        WHERE task_id = $1
+                    """, int(task_id), status, error)
+                
+                logger.debug(f"Updated LLM task {task_id} status to {status}")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to update task status: {e}")
+            # Don't raise - non-critical
+    
+    async def save_llm_analysis_result(self, task_id: str, signal_id: str, llm_result: Dict) -> None:
+        """Save LLM analysis results to database"""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO llm_analysis_results 
+                    (signal_id, task_id, llm_rating, llm_choppiness, llm_analysis_text,
+                     llm_market_context, llm_model_used, processing_time_ms, 
+                     processed_at, llm_raw_response)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
+                """,
+                signal_id,
+                int(task_id),
+                llm_result.get('rating'),
+                llm_result.get('choppiness'),
+                llm_result.get('analysis', ''),
+                safe_json_dumps(llm_result.get('market_context', {})),
+                llm_result.get('llm_model_used', 'unknown'),
+                llm_result.get('processing_time_ms', 0),
+                safe_json_dumps(llm_result))
+                
+                logger.info(f"✅ Saved LLM results for signal {signal_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to save LLM results: {e}")
+            # Don't raise - non-critical
+    
+    async def get_enhanced_signal_data(self, signal_id: str) -> Dict[str, Any]:
+        """Get signal data with LLM enhancement (JOIN query)"""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT 
+                        ts.signal_id, ts.timestamp, ts.signal_type, 
+                        ts.entry_price, ts.stop_loss, ts.target_price,
+                        ts.risk, ts.risk_reward_ratio, ts.reason,
+                        lar.llm_rating, lar.llm_choppiness, lar.llm_analysis_text,
+                        lar.llm_market_context, lar.processing_time_ms, lar.processed_at
+                    FROM trading_signals ts
+                    LEFT JOIN llm_analysis_results lar ON ts.signal_id = lar.signal_id
+                    WHERE ts.signal_id = $1
+                """, signal_id)
+                
+                if row:
+                    return dict(row)
+                else:
+                    return {}
+                    
+        except Exception as e:
+            logger.error(f"❌ Failed to get enhanced signal data: {e}")
+            return {}
+    
+    async def get_llm_processing_stats(self, session_id: str) -> Dict[str, Any]:
+        """Get LLM processing statistics for a session"""
+        try:
+            async with self.pool.acquire() as conn:
+                # Get counts by status
+                status_counts = await conn.fetch("""
+                    SELECT let.status, COUNT(*) as count
+                    FROM llm_enhancement_tasks let
+                    JOIN trading_signals ts ON let.signal_id = ts.signal_id
+                    WHERE ts.session_id = $1
+                    GROUP BY let.status
+                """, session_id)
+                
+                # Get average processing time
+                avg_time = await conn.fetchval("""
+                    SELECT AVG(lar.processing_time_ms) as avg_processing_time
+                    FROM llm_analysis_results lar
+                    JOIN trading_signals ts ON lar.signal_id = ts.signal_id
+                    WHERE ts.session_id = $1
+                """, session_id)
+                
+                # Get rating distribution
+                rating_dist = await conn.fetch("""
+                    SELECT lar.llm_rating, COUNT(*) as count
+                    FROM llm_analysis_results lar
+                    JOIN trading_signals ts ON lar.signal_id = ts.signal_id
+                    WHERE ts.session_id = $1 AND lar.llm_rating IS NOT NULL
+                    GROUP BY lar.llm_rating
+                    ORDER BY lar.llm_rating
+                """, session_id)
+                
+                stats = {
+                    'status_counts': {row['status']: row['count'] for row in status_counts},
+                    'avg_processing_time_ms': float(avg_time) if avg_time else 0,
+                    'rating_distribution': {row['llm_rating']: row['count'] for row in rating_dist}
+                }
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get LLM processing stats: {e}")
+            return {}

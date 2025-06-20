@@ -14,6 +14,10 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -22,8 +26,10 @@ from data_sources import DataSourceFactory
 from strategy.streaming_buffer import StreamingBuffer
 from strategy.patient_labels_strategy import PatientLabelsStrategy
 from database import DatabaseManager
+from llm_integration import SignalMemoryStore, LLMWorker, LLMCSVExporter
+from llm_integration.config import LLMConfig
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +44,13 @@ class PatientLabelsSystemWithDatabase:
         self.strategy = None
         self.db = None
         
+        # LLM Integration
+        self.llm_config = LLMConfig(config_dict=self.config.get('llm', {}))
+        self.memory_store = None
+        self.llm_worker = None
+        self.csv_exporter = None
+        self.llm_worker_task = None
+        
         # Stats
         self.signal_count = 0
         self.bars_processed = 0
@@ -49,6 +62,8 @@ class PatientLabelsSystemWithDatabase:
         self.output_dir = self._create_output_directory()
         
         logger.info(f"🔧 System initialized with session ID: {self.session_id}")
+        if self.llm_config.is_enabled():
+            logger.info(f"🤖 LLM integration enabled with model: {self.llm_config.get('model')}")
         
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file"""
@@ -187,6 +202,33 @@ class PatientLabelsSystemWithDatabase:
         strategy_config = self.config['strategy']
         self.strategy = PatientLabelsStrategy(**strategy_config)
         
+        # 5. Setup LLM integration if enabled
+        if self.llm_config.is_enabled():
+            try:
+                # Initialize memory store
+                memory_config = self.llm_config.get_memory_store_config()
+                self.memory_store = SignalMemoryStore(**memory_config)
+                
+                # Initialize CSV exporter
+                self.csv_exporter = LLMCSVExporter(
+                    output_dir=self.llm_config.get('csv_output_directory')
+                )
+                
+                # Initialize LLM worker (but don't start it yet)
+                worker_config = self.llm_config.get_worker_config()
+                self.llm_worker = LLMWorker(
+                    memory_store=self.memory_store,
+                    db_manager=self.db,
+                    csv_exporter=self.csv_exporter,
+                    config=worker_config
+                )
+                
+                logger.info("✅ LLM components initialized")
+            except Exception as e:
+                logger.error(f"❌ LLM setup failed: {e}")
+                logger.warning("⚠️ Continuing without LLM enhancement")
+                self.llm_config.set('enabled', False)
+        
         logger.info("✅ All components ready")
     
     async def process_bar(self, bar):
@@ -312,6 +354,7 @@ class PatientLabelsSystemWithDatabase:
         }
         
         # Save to database immediately
+        signal_id = None
         if self.db and self.db.is_connected():
             try:
                 signal_id = await self.db.save_trading_signal(signal_data, self.session_id, market_snapshot)
@@ -328,8 +371,34 @@ class PatientLabelsSystemWithDatabase:
                 
                 logger.info(f"✅ Signal {signal_id} saved to database")
                 
+                # Create LLM enhancement task if enabled
+                if self.llm_config.is_enabled() and signal_id:
+                    try:
+                        task_id = await self.db.create_llm_enhancement_task(signal_id, self.session_id)
+                        logger.debug(f"Created LLM task {task_id} for signal {signal_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to create LLM task: {e}")
+                
             except Exception as e:
                 logger.error(f"❌ Failed to save signal to database: {e}")
+        
+        # Add to memory store for LLM processing (non-blocking)
+        if self.llm_config.is_enabled() and self.memory_store and signal_id:
+            # Prepare signal data for memory store
+            memory_signal_data = {
+                'signal_id': signal_id,
+                'signal_data': signal_data,
+                'market_snapshot': market_snapshot,
+                'symbol': signal_bar.get('symbol', self.config.get('csv', {}).get('symbol', 'QQQ')),
+                'formatted_text': None,  # Will be filled by worker
+                'llm_result': None,      # Will be filled by worker
+                'status': 'pending',
+                'created_at': datetime.now()
+            }
+            
+            # Add to memory store (non-blocking)
+            self.memory_store.add_signal(memory_signal_data)
+            logger.debug(f"Added signal {signal_id} to LLM processing queue")
         
         # Display signal notification
         print(f"\n🚨 [{datetime.now().strftime('%H:%M:%S')}] NEW SIGNAL #{self.signal_count}: {signal_type}")
@@ -371,6 +440,12 @@ class PatientLabelsSystemWithDatabase:
             await self.data_source.subscribe(symbols)
             logger.info(f"📡 Subscribed to: {', '.join(symbols)}")
             
+            # Start LLM worker if enabled
+            if self.llm_config.is_enabled() and self.llm_worker:
+                logger.info("🤖 Starting LLM enhancement worker...")
+                self.llm_worker_task = asyncio.create_task(self.llm_worker.run_continuously())
+                logger.info("✅ LLM worker started in background")
+            
             # Display dashboard
             self._display_dashboard()
             
@@ -402,12 +477,14 @@ class PatientLabelsSystemWithDatabase:
         source_type = self.config['data_source'].upper()
         symbols = self.config['polygon']['symbols'] if self.config['data_source'] == 'polygon' else [self.config['csv'].get('symbol', 'QQQ')]
         db_status = "✅ CONNECTED" if (self.db and self.db.is_connected()) else "❌ DISCONNECTED"
+        llm_status = "✅ ENABLED" if self.llm_config.is_enabled() else "❌ DISABLED"
         
         print("\n" + "="*70)
         print("🎯 PATIENT LABELS TRADING SYSTEM WITH DATABASE")
         print("="*70)
         print(f"📊 Data Source: {source_type}")
         print(f"🗄️  Database: {db_status}")
+        print(f"🤖 LLM Enhancement: {llm_status}")
         print(f"🆔 Session ID: {self.session_id}")
         print(f"⚡ Strategy: Patient Labels Signal Detection")
         print(f"🎯 Symbols: {', '.join(symbols)}")
@@ -415,12 +492,42 @@ class PatientLabelsSystemWithDatabase:
             print(f"⏰ Data: Live (15-min delayed)")
         else:
             print(f"⚡ Speed: {self.config['csv'].get('speed', 1.0)}x")
+        if self.llm_config.is_enabled():
+            print(f"🧠 LLM Model: {self.llm_config.get('model').split('/')[-1]}")
         print("\nCommands:")
         print("  [Ctrl+C] - Stop system")
         print("="*70 + "\n")
     
     async def _cleanup(self):
         """Cleanup and disconnect from all services"""
+        # Stop LLM worker if running
+        if self.llm_worker:
+            try:
+                logger.info("🤖 Stopping LLM worker...")
+                self.llm_worker.stop()
+                
+                # Wait for worker to finish (with timeout)
+                if self.llm_worker_task:
+                    try:
+                        await asyncio.wait_for(self.llm_worker_task, timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("LLM worker did not stop gracefully, cancelling...")
+                        self.llm_worker_task.cancel()
+                        try:
+                            await self.llm_worker_task
+                        except asyncio.CancelledError:
+                            pass
+                
+                # Export final LLM statistics
+                if self.memory_store and self.csv_exporter:
+                    stats = self.memory_store.get_stats()
+                    self.csv_exporter.export_summary_report(stats)
+                    logger.info(f"📊 LLM Stats: {stats}")
+                
+                logger.info("✅ LLM worker stopped")
+            except Exception as e:
+                logger.warning(f"Warning during LLM cleanup: {e}")
+        
         # Stop data source
         if self.data_source:
             try:
@@ -469,6 +576,17 @@ class PatientLabelsSystemWithDatabase:
         print(f"🚨 Signals Generated: {self.signal_count}")
         print(f"📊 Data Source: {source_type}")
         print(f"🗄️  Database: {'✅ Used' if self.database_was_used else '❌ Not used'}")
+        
+        # Add LLM statistics if enabled
+        if self.llm_config.is_enabled() and self.memory_store:
+            stats = self.memory_store.get_stats()
+            print(f"🤖 LLM Processed: {stats.get('total_processed', 0)}")
+            print(f"⏳ LLM Pending: {stats.get('pending', 0)}")
+            if self.csv_exporter:
+                csv_stats = self.csv_exporter.get_export_stats()
+                if 'signals_csv' in csv_stats:
+                    print(f"📄 LLM Signals CSV: {csv_stats['signals_csv'].get('rows', 0)} rows")
+        
         print(f"⏱️  Session Duration: {(datetime.now() - self.session_start_time).total_seconds() / 60:.1f} minutes")
         print(f"📁 Backup Directory: {self.output_dir}/")
         print("="*70)
